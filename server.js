@@ -23,7 +23,6 @@ async function getGlobalSystemPrompt() {
 
 // 获取会话的有效 system_prompt（会话自定义 or 全局默认）
 async function getEffectiveSystemPrompt(sessionId) {
-  // 获取会话信息
   const { data: session, error } = await supabase
     .from('sessions')
     .select('system_prompt')
@@ -59,15 +58,13 @@ app.post('/api/sessions', async (req, res) => {
   res.json(data[0]);
 });
 
-// 更新会话（包括重命名和修改 system_prompt）
+// 更新会话（支持重命名和修改 system_prompt）
 app.patch('/api/sessions/:id', async (req, res) => {
   const { id } = req.params;
   const { name, system_prompt } = req.body;
-  const updateData = {};
+  const updateData = { updated_at: new Date() };
   if (name !== undefined) updateData.name = name;
   if (system_prompt !== undefined) updateData.system_prompt = system_prompt;
-  updateData.updated_at = new Date();
-  
   const { data, error } = await supabase
     .from('sessions')
     .update(updateData)
@@ -97,7 +94,7 @@ app.get('/api/messages/:sessionId', async (req, res) => {
   res.json(data);
 });
 
-// ---------- DeepSeek 调用 ----------
+// ---------- DeepSeek 调用（返回 token 用量）----------
 async function callDeepSeek(messages) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
@@ -121,10 +118,10 @@ async function callDeepSeek(messages) {
   return { reply, tokenUsage };
 }
 
-// ---------- 聊天核心 ----------
+// ---------- 核心聊天接口（返回 token 用量）----------
 app.post('/api/chat', async (req, res) => {
   const { sessionId, message } = req.body;
-  if (!sessionId || !message) return res.status(400).json({ error: 'Missing' });
+  if (!sessionId || !message) return res.status(400).json({ error: 'Missing sessionId or message' });
   try {
     // 保存用户消息
     const { error: userErr } = await supabase
@@ -142,13 +139,15 @@ app.post('/api/chat', async (req, res) => {
       .limit(20);
     if (histErr) throw histErr;
 
-    // 获取有效 system_prompt（会话级优先）
+    // 获取有效的 system_prompt（会话级优先）
     const systemPrompt = await getEffectiveSystemPrompt(sessionId);
     const messagesForAI = [
       { role: 'system', content: systemPrompt },
       ...history.map(m => ({ role: m.role, content: m.content }))
     ];
-    const aiReply = await callDeepSeek(messagesForAI);
+
+    // 调用 AI，获取回复和 token 用量
+    const { reply: aiReply, tokenUsage } = await callDeepSeek(messagesForAI);
 
     // 保存 AI 回复
     const { error: aiErr } = await supabase
@@ -159,7 +158,8 @@ app.post('/api/chat', async (req, res) => {
     // 更新会话的 updated_at
     await supabase.from('sessions').update({ updated_at: new Date() }).eq('id', sessionId);
 
-    res.json({ reply: aiReply });
+    // 返回回复和 token 用量
+    res.json({ reply: aiReply, token_usage: tokenUsage });
   } catch (error) {
     console.error('Chat error:', error);
     res.status(500).json({ error: error.message });
