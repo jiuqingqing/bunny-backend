@@ -103,7 +103,10 @@ async function callDeepSeek(messages) {
   if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
   const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
     body: JSON.stringify({
       model: 'deepseek-chat',
       messages: messages,
@@ -113,7 +116,9 @@ async function callDeepSeek(messages) {
   });
   const data = await response.json();
   if (data.error) throw new Error(data.error.message);
-  return data.choices[0].message.content;
+  const reply = data.choices[0].message.content;
+  const tokenUsage = data.usage?.total_tokens || 0;
+  return { reply, tokenUsage };
 }
 
 // ---------- 聊天核心 ----------
