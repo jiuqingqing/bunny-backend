@@ -1,122 +1,164 @@
 const express = require('express');
 const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => res.send('Backend is running!'));
+// 初始化 Supabase 客户端（使用 service_role 密钥）
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// ---------- 内存存储（模拟数据库）----------
-let sessions = [
-  { id: 1, name: '示例会话', created_at: new Date(), updated_at: new Date() }
-];
-let messages = [
-  { id: 1, session_id: 1, role: 'assistant', content: '你好！我是你的AI助手。', created_at: new Date() }
-];
+// 健康检查
+app.get('/', (req, res) => {
+  res.send('Backend is running!');
+});
 
-// 获取所有会话
-app.get('/api/sessions', (req, res) => {
-  res.json(sessions);
+// ========== 会话 APIs ==========
+// 获取所有会话（按更新时间倒序）
+app.get('/api/sessions', async (req, res) => {
+  const { data, error } = await supabase
+    .from('sessions')
+    .select('*')
+    .order('updated_at', { ascending: false });
+  if (error) {
+    console.error('Error fetching sessions:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  res.json(data);
 });
 
 // 创建新会话
-app.post('/api/sessions', (req, res) => {
-  const newSession = {
-    id: Date.now(),
-    name: req.body.name || '新对话',
-    created_at: new Date(),
-    updated_at: new Date()
-  };
-  sessions.unshift(newSession);
-  res.json(newSession);
+app.post('/api/sessions', async (req, res) => {
+  const { name } = req.body;
+  const { data, error } = await supabase
+    .from('sessions')
+    .insert([{ name: name || '新对话', updated_at: new Date() }])
+    .select();
+  if (error) {
+    console.error('Error creating session:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  res.json(data[0]);
 });
 
 // 重命名会话
-app.put('/api/sessions/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const session = sessions.find(s => s.id === id);
-  if (session) {
-    session.name = req.body.name;
-    session.updated_at = new Date();
-    res.json(session);
-  } else {
-    res.status(404).json({ error: 'Session not found' });
+app.put('/api/sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  const { data, error } = await supabase
+    .from('sessions')
+    .update({ name, updated_at: new Date() })
+    .eq('id', id)
+    .select();
+  if (error) {
+    console.error('Error renaming session:', error);
+    return res.status(500).json({ error: error.message });
   }
+  res.json(data[0]);
 });
 
-// 删除会话
-app.delete('/api/sessions/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  sessions = sessions.filter(s => s.id !== id);
-  messages = messages.filter(m => m.session_id !== id);
+// 删除会话（级联删除相关消息）
+app.delete('/api/sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  const { error } = await supabase.from('sessions').delete().eq('id', id);
+  if (error) {
+    console.error('Error deleting session:', error);
+    return res.status(500).json({ error: error.message });
+  }
   res.json({ success: true });
 });
 
-// 获取某个会话的消息
-app.get('/api/messages/:sessionId', (req, res) => {
-  const sessionId = parseInt(req.params.sessionId);
-  const msgs = messages.filter(m => m.session_id === sessionId);
-  res.json(msgs);
+// ========== 消息 APIs ==========
+// 获取某个会话的消息（按时间升序）
+app.get('/api/messages/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('session_id', sessionId)
+    .eq('visible', true)
+    .order('created_at', { ascending: true });
+  if (error) {
+    console.error('Error fetching messages:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  res.json(data);
 });
 
-// DeepSeek API 调用函数
-async function callDeepSeek(message) {
+// ========== DeepSeek 调用函数 ==========
+async function callDeepSeek(messages) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    return "⚠️ 请先在 Render 环境变量中配置 DEEPSEEK_API_KEY（从 platform.deepseek.com 获取）";
+    throw new Error('DEEPSEEK_API_KEY not set in environment variables');
   }
-  try {
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        messages: [{ role: 'user', content: message }],
-        temperature: 0.7,
-        max_tokens: 2000
-      })
-    });
-    const data = await response.json();
-    if (data.error) throw new Error(data.error.message);
-    return data.choices[0].message.content;
-  } catch (err) {
-    console.error('DeepSeek 调用失败:', err);
-    return `AI 调用出错：${err.message}`;
-  }
+  const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 2000
+    })
+  });
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.choices[0].message.content;
 }
 
-// 聊天接口
+// ========== 聊天核心接口 ==========
 app.post('/api/chat', async (req, res) => {
-  const { sessionId, message } = req.body;
+  const { sessionId, message, model } = req.body;
   if (!sessionId || !message) {
     return res.status(400).json({ error: 'Missing sessionId or message' });
   }
-  const sessId = parseInt(sessionId);
-  // 保存用户消息
-  messages.push({
-    id: Date.now(),
-    session_id: sessId,
-    role: 'user',
-    content: message,
-    created_at: new Date()
-  });
-  // 获取 AI 回复
-  const aiReply = await callDeepSeek(message);
-  // 保存 AI 消息
-  messages.push({
-    id: Date.now() + 1,
-    session_id: sessId,
-    role: 'assistant',
-    content: aiReply,
-    created_at: new Date()
-  });
-  // 更新会话的 updated_at
-  const session = sessions.find(s => s.id === sessId);
-  if (session) session.updated_at = new Date();
-  res.json({ reply: aiReply });
+
+  try {
+    // 1. 保存用户消息
+    const { error: userError } = await supabase
+      .from('messages')
+      .insert([{ session_id: sessionId, role: 'user', content: message }]);
+    if (userError) throw userError;
+
+    // 2. 获取该会话的历史消息（最近20条，用于上下文）
+    const { data: history, error: historyError } = await supabase
+      .from('messages')
+      .select('role, content')
+      .eq('session_id', sessionId)
+      .eq('visible', true)
+      .order('created_at', { ascending: true })
+      .limit(20);
+    if (historyError) throw historyError;
+
+    // 构造消息列表（已经包含刚保存的用户消息）
+    const chatMessages = history.map(msg => ({
+      role: msg.role,
+      content: msg.content
+    }));
+
+    // 3. 调用 DeepSeek API
+    const aiReply = await callDeepSeek(chatMessages);
+
+    // 4. 保存 AI 回复
+    const { data: aiMsg, error: aiError } = await supabase
+      .from('messages')
+      .insert([{ session_id: sessionId, role: 'assistant', content: aiReply }])
+      .select();
+    if (aiError) throw aiError;
+
+    // 5. 更新会话的 updated_at
+    await supabase.from('sessions').update({ updated_at: new Date() }).eq('id', sessionId);
+
+    res.json({ reply: aiReply, messageId: aiMsg[0].id });
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 const PORT = process.env.PORT || 3001;
